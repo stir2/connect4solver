@@ -1,3 +1,4 @@
+
 /**
  * file solve.c
  * @author Stirling Gould
@@ -6,12 +7,13 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdbool.h>
 
+#define HEIGHT 6
+#define WIDTH 7
+#define MAX_TURNS HEIGHT * WIDTH
 
-#define NUM_ROWS 6
-#define NUM_COLS 7
-
-#define GAME_ONGOING -1;
+#define GAME_ONGOING -1
 #define RED 0
 #define YELLOW 1
 #define TIE 2
@@ -23,25 +25,45 @@
 int winDirections[] =        {8, 1, 7, 9};
 
 typedef struct {
-    uint64_t slots_red; // Each bit represents a position filled/unfilled with a red piece
-    uint64_t slots_yellow; // Each bit represents a position filled/unfilled with a yellow piece
-    // Note that no position should have a 1 in both slots_red and slots_yellow, +8 unused bits
+    uint64_t mask; // Each bit represents a position filled/unfilled with any piece
+    uint64_t current_player; // Each bit represents a position filled/unfilled with a the current player's piece
 } Board;
 
-void displayBoard(Board bd){
+int stackHeight(Board *bd, int slot) {
+    uint64_t column = (bd->mask) & (HEX_SINGLE_COLUMN << slot);
+
+    // Efficient assembly for counting bits in the 64-bit integer mask
+    return __builtin_popcountll(column);
+}
+
+int numMoves(Board *bd){
+    return __builtin_popcountll(bd->mask);
+}
+
+void displayBoard(Board *bd, bool isRedTurn) {
+    uint64_t slots_red;
+    uint64_t slots_yellow;
+
+    if(isRedTurn){
+        slots_red = bd->current_player;
+        slots_yellow = bd->mask ^ bd->current_player;
+    } else {
+        slots_yellow = bd->current_player;
+        slots_red = bd->mask ^ bd->current_player;
+    }
+
     printf("╔══╦══╦══╦══╦══╦══╦══╗\n");
-    for(int r = NUM_ROWS - 1; r >= 0; r--) {
+    for(int r = HEIGHT - 1; r >= 0; r--) {
         printf("║");
-        for(int c = 0; c < NUM_COLS; c++) {
-            uint64_t pos = (r * (NUM_COLS + 1) + c); // NUM_COLS + 1: Add extra zero column for padding, efficient win conditions
-            if(((bd.slots_yellow >> pos) & 0x1) == 1){
+        for(int c = 0; c < WIDTH; c++) {
+            uint64_t pos = (r * (WIDTH + 1) + c); // WIDTH + 1: Add extra zero column for padding, efficient win conditions
+            if(((slots_yellow >> pos) & 0x1) == 1 ){
                 printf("🟡");
-            } else if (((bd.slots_red >> pos) & 0x1) == 1){
+            } else if (((slots_red >> pos) & 0x1) == 1) {
                 printf("🔴");
             } else {
                 printf("  ");
             }
-
             printf("║");
         }
         printf("\n");
@@ -49,78 +71,109 @@ void displayBoard(Board bd){
     printf("╚━━╩━━╩━━╩━━╩━━╩━━╩━━╝\n");
 }
 
-void placeInPos(Board *bd, uint64_t pos, bool color){
-    if(color == RED){
-        bd->slots_red |= (0x1ull << pos);
-    } else {
-        bd->slots_yellow |= (0x1ull << pos);
-    }
+void placeInPos(Board *bd, uint64_t pos) {
+    // Flip the current player mask to the other player
+    // by XORing with the total board mask
+    bd->current_player ^= bd->mask;
+
+    // Add the piece to the total board mask
+    // This placed piece will appear in current_player in the next board swap
+    bd->mask |= (0x1ull << pos);
 }
 
-int stackHeight(Board bd, int slot){
-    uint64_t column = (bd.slots_red | bd.slots_yellow) & (HEX_SINGLE_COLUMN << slot);
-    return __builtin_popcountll(column);
+bool play(Board *bd, int slot) {
+    int sh = stackHeight(bd, slot);
+        if(sh >= 6) {
+            return false;
+        }
+
+    placeInPos(bd, sh * (WIDTH + 1) + slot);
+    return true;
 }
 
-int winState(Board bd){
-    for(int d = 0; d < 4; d++){
+bool playerWins(Board *bd) {
+    uint64_t player_wins = false;
+
+    uint64_t current_player = bd->mask ^ bd->current_player;
+    for(int d = 0; d < 4; d++) { // Try all shift directions encoding a win condition
         int shift = winDirections[d];
-
-        uint64_t red_wins = (bd.slots_red) & 
-                            (bd.slots_red >> shift) & 
-                            (bd.slots_red >> (2 * shift)) & 
-                            (bd.slots_red >> (3 * shift));
-        
-        // Returns 0 if red_wins is *any* nonzero integer
-        if(red_wins) return RED;
-
-        uint64_t yellow_wins = (bd.slots_yellow) & 
-                            (bd.slots_yellow >> shift) & 
-                            (bd.slots_yellow >> (2 * shift)) & 
-                            (bd.slots_yellow >> (3 * shift));
-        
-        // Returns 1 if yellow_wins is *any* nonzero integer
-        if(yellow_wins) return YELLOW; 
+        player_wins = (current_player) & 
+                        (current_player >> shift) & 
+                        (current_player >> (2 * shift)) & 
+                        (current_player >> (3 * shift));
+        if(player_wins){
+            return true;
+        }
     }
 
-    // All slots are filled and no player has won
-    if((bd.slots_red | bd.slots_yellow) == HEX_BOARD_FULL) return TIE;
+    return false;
+}
+
+int negamax(Board *bd){
+    if(bd->mask == HEX_BOARD_FULL){
+        return 0;
+    }
+
+    // Lower bound of possible score
+    int bestScore = -MAX_TURNS;
+
+    for(int s = 0; s < WIDTH; s++){
+        if(stackHeight(bd, s) >= 6) // Prevent playing in full slots
+            continue;
     
-    // All win directions searched, no player has won, and the board is not full
-    return GAME_ONGOING;
+        Board *bd2 = &(*bd);
+
+        play(bd2, s); // Check if the current player can win next move
+        if(playerWins(bd2))
+            return (WIDTH * HEIGHT) + 1 - (numMoves(bd2) / 2);
+
+        // The current player's score is negative the opponent's score after playing in this slot
+        int score = - negamax(bd2);
+        if(score > bestScore)
+            bestScore = score;
+    }
+
+    return bestScore;
 }
 
 int main(){
     Board bd = {0x0, 0x0}; // Initialize empty board
-    displayBoard(bd);
-    int turn = 0;
-
+    displayBoard(&bd, true);
+    int turns = 0;
+    
     while(1){
-        printf("> Place piece in row 1-7:\n");
+        if(turns % 2 == 0){
+            printf("Turn #%d, 🔴 Red to play.\n", turns);
+        } else {
+            printf("Turn #%d, 🟡 Yellow to play.\n", turns);
+        }
+        printf("> Place piece in row 1-7: ");
 
         int slot;
-        if(scanf("%d", &slot) == 1 && slot >= 1 && slot <= NUM_COLS){
+        if(scanf("%d", &slot) == 1 && slot >= 1 && slot <= WIDTH) {
             slot--;
         } else { // User input is not a number, or not 1-7.
             printf("Invalid slot.\n");
             continue;
         }
 
-        int sh = stackHeight(bd, slot);
-        if(sh >= 6){
+        if(!play(&bd, slot)){
             printf("Slot %d is already full!\n", (slot + 1));
             continue;
         }
+ 
+        displayBoard(&bd, turns % 2);
 
-        placeInPos(&bd, sh * (NUM_COLS + 1) + slot, turn % 2);
-        displayBoard(bd);
-
-        int ws = winState(bd);
-        switch(ws){
-            case -2: printf("It's a tie!\n"); exit(0);
-            case -1: turn++; continue;
-            case 0: printf("Red(🔴) wins!\n"); exit(0);
-            case 1: printf("Yellow(🟡) wins!\n"); exit(0);
+        if(playerWins(&bd)){
+            if(turns % 2 == 0){
+                printf("🔴 Red wins!\n"); exit(0);
+            } else {
+                printf("🟡 Yellow wins!\n"); exit(0);
+            }
+        } else if(turns == MAX_TURNS - 1) {
+            printf("It's a tie!\n"); exit(0);
+        } else {
+            turns++;
         }
     }
 }
