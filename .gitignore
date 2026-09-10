@@ -1,0 +1,26 @@
+# Object files
+*.o
+
+# Static Libraries
+*.lib
+*.a
+*.def
+
+# Executables
+*.exe
+*.out
+test
+play
+
+# OS Generated Files
+.DS_Store
+.AppleDouble
+.Spotlight-V100
+.TemporaryFiles
+.Trashes
+.com.apple.timemachine.donotpresent
+
+# IDEs and Editors
+.vscode/
+!.vscode/settings.json
+*~

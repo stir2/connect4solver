@@ -1,68 +1,128 @@
-
 /**
  * file solve.c
  * @author Stirling Gould
 */
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <stdint.h>
-#include <stdbool.h>
+#include "solve.h"
+#include "transposition_table.h"
 
-#define HEIGHT 6
-#define WIDTH 7
-#define MAX_TURNS HEIGHT * WIDTH
-
-#define GAME_ONGOING -1
-#define RED 0
-#define YELLOW 1
-#define TIE 2
-
-#define HEX_BOARD_FULL 0x007F7F7F7F7F7F7Full
-#define HEX_SINGLE_COLUMN 0x0101010101010101ull
-
-// bitshift instructions for: |  -  \  / win conditions
-int winDirections[] =        {8, 1, 7, 9};
-
-typedef struct {
-    uint64_t mask; // Each bit represents a position filled/unfilled with any piece
-    uint64_t current_player; // Each bit represents a position filled/unfilled with a the current player's piece
-} Board;
+const int height = 6;
+const int width = 7;
+const int max_turns = height * width;
+const int EXPLORE_ORDER[7] = {3, 2, 4, 1, 5, 0, 6};
+int searched;
 
 int stackHeight(Board *bd, int slot) {
-    uint64_t column = (bd->mask) & (HEX_SINGLE_COLUMN << slot);
-
-    // Efficient assembly for counting bits in the 64-bit integer mask
-    return __builtin_popcountll(column);
+    return __builtin_popcount(bd->mask[slot]); // Efficient assembly for counting bits
 }
 
-int numMoves(Board *bd){
-    return __builtin_popcountll(bd->mask);
+bool canPlay(Board *bd, int slot){
+    return stackHeight(bd, slot) < height;
 }
 
-void displayBoard(Board *bd, bool isRedTurn) {
-    uint64_t slots_red;
-    uint64_t slots_yellow;
+void swapPlayers(Board *bd){
+    for(int s = 0; s < width; s++)
+        bd->current_player[s] ^= bd->mask[s];
+}
 
-    if(isRedTurn){
-        slots_red = bd->current_player;
-        slots_yellow = bd->mask ^ bd->current_player;
-    } else {
-        slots_yellow = bd->current_player;
-        slots_red = bd->mask ^ bd->current_player;
+/**
+ * Place a piece in both board masks and increment move count
+ * @param bd the board to edit
+ * @param piece_index the index of the piece to place (4 bits select column, 4 bits select row)
+ */
+void placePiece(Board *bd, uint8_t piece_index) {
+    int col = piece_index >> 4;
+    int row = piece_index % 16;
+    int piece = 0x1 << row;
+
+    bd->current_player[col] |= piece;
+    bd->mask[col] |= piece;
+
+    bd->hash_normal ^= ZOBRIST_TABLE[bd->move_count % 2][row][col];
+    bd->hash_mirror ^= ZOBRIST_TABLE[bd->move_count % 2][row][width - col - 1];
+
+    bd->move_count++;
+}
+
+void play(Board *bd, int slot) {
+    placePiece(bd, (slot * STORED_HEIGHT + stackHeight(bd, slot)));
+}
+
+bool playerWinsLocal(Board *bd, int slot){
+
+    // The board's current player is now the opponent's, switch back before checking wins
+    uint16_t *p = bd->current_player;
+
+    // Check for vertical wins, fastest to compute
+    uint16_t col = p[slot];
+    for(int i = 0; i < CONNECT - 1; i++)
+        col &= (col << 1);
+
+    if(col) return true;
+
+    // Check for horizontal, diagonal wins
+    // We can rule out columns < 0 or > (width - CONNECT)
+    int min_col = (slot < CONNECT - 1) ? 0 : slot - (CONNECT - 1);
+    int max_col = (slot > width - CONNECT) ? width - CONNECT : slot;
+    for(int c = min_col; c <= max_col; c++){
+
+        // Initialize with starting column
+        uint16_t h = p[c];
+        uint16_t d1 = p[c];
+        uint16_t d2 = p[c];
+
+        // Bitwise AND the next (CONNECT - 1) columns in the 3 different directions
+        for(int i = 1; i < CONNECT; i++){
+            h &= p[c + i];                  // No height shift
+            d1 &= (p[c + i] >> i);            // Shift next column down
+            d2 &= (p[c + i] << i);            // Shift next column up
+        }
+
+        // If there is a 1 left in any direction then its a win
+        if(h || d1 || d2) return true;
     }
+    return false;
+}
 
+/**
+ * Determines whether a certain move wins the game
+ * @param bd the board to check
+ * @param slot the winning move candidate
+ * @return true if the move is valid and it wins the game
+ */
+bool isWinningMove(Board *bd, int slot){
+    int sh = stackHeight(bd, slot);
+
+    if(sh >= height) return false;
+
+    Board bd2 = *bd; // Create copy of this board
+    uint8_t piece_index = (slot * STORED_HEIGHT) + sh;
+
+    // No need to ever swap players, bd2 shall be vanquished in due time >:3
+    placePiece(&bd2, piece_index);
+    return playerWinsLocal(&bd2, slot);
+}
+
+/**
+ * -- MOVE THIS BACK TO play.c LATER --
+ * Prints out a colorful representation of the board
+ * @param bd the board to display
+ * @param player_swap is true if bd's current_player has not yet been swapped
+ */
+void displayBoard(Board *bd, bool player_swap) {
+    bool is_red_turn = bd->move_count % 2 == 0;
+    
     printf("╔══╦══╦══╦══╦══╦══╦══╗\n");
-    for(int r = HEIGHT - 1; r >= 0; r--) {
+    for(int r = height - 1; r >= 0; r--){
         printf("║");
-        for(int c = 0; c < WIDTH; c++) {
-            uint64_t pos = (r * (WIDTH + 1) + c); // WIDTH + 1: Add extra zero column for padding, efficient win conditions
-            if(((slots_yellow >> pos) & 0x1) == 1 ){
-                printf("🟡");
-            } else if (((slots_red >> pos) & 0x1) == 1) {
+        for(int c = 0; c < width; c++){
+            // printf("%d%d", (bd->mask[c] >> r) & 0x1, (bd->current_player[c] >> r) & 0x1);
+            if(!((bd->mask[c] >> r) & 0x1)){
+                printf("  ");
+            } else if ((is_red_turn != player_swap) == ((bd->current_player[c] >> r) & 0x1)){
                 printf("🔴");
             } else {
-                printf("  ");
+                printf("🟡");
             }
             printf("║");
         }
@@ -71,109 +131,54 @@ void displayBoard(Board *bd, bool isRedTurn) {
     printf("╚━━╩━━╩━━╩━━╩━━╩━━╩━━╝\n");
 }
 
-void placeInPos(Board *bd, uint64_t pos) {
-    // Flip the current player mask to the other player
-    // by XORing with the total board mask
-    bd->current_player ^= bd->mask;
+int negamax(Board *bd, int alpha, int beta){
+    // getchar();
+    // printf("[%d, %d]\n", alpha, beta);
+    // displayBoard(bd, false);
 
-    // Add the piece to the total board mask
-    // This placed piece will appear in current_player in the next board swap
-    bd->mask |= (0x1ull << pos);
-}
+    searched++;
 
-bool play(Board *bd, int slot) {
-    int sh = stackHeight(bd, slot);
-        if(sh >= 6) {
-            return false;
-        }
+    // Upper bound of possible score
+    int max = (width * height - 1 - bd->move_count) / 2;
+    if(beta > max){
+        beta = max;                     // Relax beta to our best possible score
+        if(alpha >= beta) return beta;  // Prune if [alpha, beta] window is empty
+    }
 
-    placeInPos(bd, sh * (WIDTH + 1) + slot);
-    return true;
-}
+    uint64_t hash = lowestHash(bd);
+    TTEntry bd_eval = tableGet(hash);
 
-bool playerWins(Board *bd) {
-    uint64_t player_wins = false;
+    if(bd_eval.hash == hash){
+        // printf("Found hash %ld, score %d\n", hash, bd_eval.score);
+        return bd_eval.score;
+    }
 
-    uint64_t current_player = bd->mask ^ bd->current_player;
-    for(int d = 0; d < 4; d++) { // Try all shift directions encoding a win condition
-        int shift = winDirections[d];
-        player_wins = (current_player) & 
-                        (current_player >> shift) & 
-                        (current_player >> (2 * shift)) & 
-                        (current_player >> (3 * shift));
-        if(player_wins){
-            return true;
+    if(bd->move_count == height * width) return 0;
+
+    // Check if current player can win in 1 move
+    for(int s = 0; s < width; s++){
+        if(isWinningMove(bd, s)){
+            return (width * height + 1 - bd->move_count) / 2;
         }
     }
 
-    return false;
-}
+    for(int i = 0; i < width; i++){
+        int s = EXPLORE_ORDER[i];
+        if(!canPlay(bd, s)) continue; // Prevent playing in full slots
 
-int negamax(Board *bd){
-    if(bd->mask == HEX_BOARD_FULL){
-        return 0;
+        Board bd2 = (*bd); // Create copy of this board
+        play(&bd2, s);
+        swapPlayers(&bd2);
+        
+        int score = - negamax(&bd2, -beta, -alpha); // Explore the opponent's score in [-beta, -alpha] window
+        
+        if(score >= beta){
+            tablePut(hash, score); // Cache the cutoff
+            return score; // Prune if we find a better move than what we were searching for
+        } 
+        if(score > alpha) alpha = score; // Relax the window for the next search
     }
 
-    // Lower bound of possible score
-    int bestScore = -MAX_TURNS;
-
-    for(int s = 0; s < WIDTH; s++){
-        if(stackHeight(bd, s) >= 6) // Prevent playing in full slots
-            continue;
-    
-        Board *bd2 = &(*bd);
-
-        play(bd2, s); // Check if the current player can win next move
-        if(playerWins(bd2))
-            return (WIDTH * HEIGHT) + 1 - (numMoves(bd2) / 2);
-
-        // The current player's score is negative the opponent's score after playing in this slot
-        int score = - negamax(bd2);
-        if(score > bestScore)
-            bestScore = score;
-    }
-
-    return bestScore;
-}
-
-int main(){
-    Board bd = {0x0, 0x0}; // Initialize empty board
-    displayBoard(&bd, true);
-    int turns = 0;
-    
-    while(1){
-        if(turns % 2 == 0){
-            printf("Turn #%d, 🔴 Red to play.\n", turns);
-        } else {
-            printf("Turn #%d, 🟡 Yellow to play.\n", turns);
-        }
-        printf("> Place piece in row 1-7: ");
-
-        int slot;
-        if(scanf("%d", &slot) == 1 && slot >= 1 && slot <= WIDTH) {
-            slot--;
-        } else { // User input is not a number, or not 1-7.
-            printf("Invalid slot.\n");
-            continue;
-        }
-
-        if(!play(&bd, slot)){
-            printf("Slot %d is already full!\n", (slot + 1));
-            continue;
-        }
- 
-        displayBoard(&bd, turns % 2);
-
-        if(playerWins(&bd)){
-            if(turns % 2 == 0){
-                printf("🔴 Red wins!\n"); exit(0);
-            } else {
-                printf("🟡 Yellow wins!\n"); exit(0);
-            }
-        } else if(turns == MAX_TURNS - 1) {
-            printf("It's a tie!\n"); exit(0);
-        } else {
-            turns++;
-        }
-    }
+    tablePut(hash, alpha);
+    return alpha;
 }
